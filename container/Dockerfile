@@ -87,7 +87,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 # only-built-dependencies gates pnpm's supply-chain policy:
 #   - agent-browser has a postinstall build step.
 ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
+ENV PATH="/workspace/agent/bin:$PNPM_HOME:$PATH"
 # Pin pnpm to match the host (package.json packageManager). pnpm 11 stopped
 # honoring `only-built-dependencies[]=` in .npmrc for global installs, which
 # silently skips agent-browser's bin chmod. Keep this in lockstep with
@@ -116,6 +116,7 @@ RUN chmod +x /app/entrypoint.sh
 
 # ---- Workspace + permissions -------------------------------------------------
 RUN mkdir -p /workspace/group /workspace/extra && \
+    printf 'export PATH="/workspace/agent/bin:$PATH"\n' > /etc/profile.d/nanoclaw-agent-bin.sh && \
     chown -R node:node /workspace && \
     chmod 777 /home/node
 
