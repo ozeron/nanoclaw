@@ -15,7 +15,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Keep in sync with .claude/skills/add-imessage/SKILL.md.
+# Keep in sync with .agents/skills/add-imessage/SKILL.md.
 ADAPTER_VERSION="chat-adapter-imessage@0.1.1"
 
 # Resolve which remote carries the channels branch — handles forks where
