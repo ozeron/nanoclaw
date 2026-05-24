@@ -26,10 +26,15 @@ export const CONTAINER_RUNTIME_BIN: ContainerRuntime = resolveContainerRuntime()
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
-  if (os.platform() === 'linux') {
+  if (os.platform() !== 'linux') return [];
+
+  // Docker does not expose host.docker.internal on Linux by default.
+  if (CONTAINER_RUNTIME_BIN === 'docker') {
     return ['--add-host=host.docker.internal:host-gateway'];
   }
+
+  // Podman exposes host.containers.internal/host.docker.internal through its own host-gateway handling.
+  // Passing Docker-only host-gateway flags can cause inconsistencies, so we let Podman handle this itself.
   return [];
 }
 

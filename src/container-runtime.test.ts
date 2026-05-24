@@ -1,4 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Podman/Docker behavior is runtime-dependent; normalize platform to Linux for deterministic tests.
+vi.mock('os', () => ({
+  default: { platform: () => 'linux' },
+}));
 
 // Mock log
 vi.mock('./log.js', () => ({
@@ -36,12 +41,35 @@ beforeEach(() => {
   mockSpawnSync.mockReturnValue({ status: 0 });
 });
 
+afterEach(() => {
+  delete process.env.CONTAINER_RUNTIME;
+});
+
+async function hostGatewayArgsForRuntime(runtime: 'docker' | 'podman'): Promise<string[]> {
+  process.env.CONTAINER_RUNTIME = runtime;
+  vi.resetModules();
+  const runtimeModule = await import('./container-runtime.js');
+  return runtimeModule.hostGatewayArgs();
+}
+
 // --- Pure functions ---
 
 describe('readonlyMountArgs', () => {
   it('returns -v flag with :ro suffix', () => {
     const args = readonlyMountArgs('/host/path', '/container/path');
     expect(args).toEqual(['-v', '/host/path:/container/path:ro']);
+  });
+});
+
+describe('hostGatewayArgs', () => {
+  it('adds the Docker host gateway alias on Linux with Docker runtime', async () => {
+    const args = await hostGatewayArgsForRuntime('docker');
+    expect(args).toEqual(['--add-host=host.docker.internal:host-gateway']);
+  });
+
+  it('does not inject host-gateway args for Podman runtime', async () => {
+    const args = await hostGatewayArgsForRuntime('podman');
+    expect(args).toEqual([]);
   });
 });
 
