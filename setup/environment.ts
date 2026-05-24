@@ -42,9 +42,9 @@ export function detectExistingDisplayName(projectRoot: string): string | null {
   let db: Database.Database | null = null;
   try {
     db = new Database(dbPath, { readonly: true });
-    const row = db
-      .prepare(`SELECT display_name FROM users WHERE id = 'cli:local'`)
-      .get() as { display_name: string } | undefined;
+    const row = db.prepare(`SELECT display_name FROM users WHERE id = 'cli:local'`).get() as
+      | { display_name: string }
+      | undefined;
     return row?.display_name?.trim() || null;
   } catch {
     return null;
@@ -87,8 +87,9 @@ export async function run(_args: string[]): Promise<void> {
   const wsl = isWSL();
   const headless = isHeadless();
 
-  // Check Docker
+  // Check container runtime
   let docker: 'running' | 'installed_not_running' | 'not_found' = 'not_found';
+  let podman: 'running' | 'installed_not_running' | 'not_found' = 'not_found';
   if (commandExists('docker')) {
     try {
       const { execSync } = await import('child_process');
@@ -98,40 +99,65 @@ export async function run(_args: string[]): Promise<void> {
       docker = 'installed_not_running';
     }
   }
+  if (commandExists('podman')) {
+    try {
+      const { execSync } = await import('child_process');
+      execSync('podman info', { stdio: 'ignore' });
+      podman = 'running';
+    } catch {
+      podman = 'installed_not_running';
+    }
+  }
 
   // Check existing config
   const hasEnv = fs.existsSync(path.join(projectRoot, '.env'));
 
   const authDir = path.join(projectRoot, 'store', 'auth');
-  const hasAuth = fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
+  const hasLegacyAuth = fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
+  const hasCodexApiKey = Boolean(process.env.OPENAI_API_KEY || readEnvKey('OPENAI_API_KEY', projectRoot));
+  let hasCodexLogin = false;
+  if (commandExists('codex')) {
+    try {
+      const { execSync } = await import('child_process');
+      execSync('codex login status', { stdio: 'ignore' });
+      hasCodexLogin = true;
+    } catch {
+      hasCodexLogin = false;
+    }
+  }
+  const hasAuth = hasLegacyAuth || hasCodexApiKey || hasCodexLogin;
 
   const hasRegisteredGroups = detectRegisteredGroups(projectRoot);
 
   // Check for existing OpenClaw installation
   const homedir = (await import('os')).homedir();
-  const openClawPath =
-    fs.existsSync(path.join(homedir, '.openclaw')) ? path.join(homedir, '.openclaw') :
-    fs.existsSync(path.join(homedir, '.clawdbot')) ? path.join(homedir, '.clawdbot') :
-    null;
+  const openClawPath = fs.existsSync(path.join(homedir, '.openclaw'))
+    ? path.join(homedir, '.openclaw')
+    : fs.existsSync(path.join(homedir, '.clawdbot'))
+      ? path.join(homedir, '.clawdbot')
+      : null;
 
-  log.info(
-    'Environment check complete',
-    {
-      platform,
-      wsl,
-      docker,
-      hasEnv,
-      hasAuth,
-      hasRegisteredGroups,
-      openClawPath,
-    },
-  );
+  log.info('Environment check complete', {
+    platform,
+    wsl,
+    docker,
+    podman,
+    hasEnv,
+    hasAuth,
+    hasRegisteredGroups,
+    openClawPath,
+  });
 
   emitStatus('CHECK_ENVIRONMENT', {
     PLATFORM: platform,
     IS_WSL: wsl,
     IS_HEADLESS: headless,
     DOCKER: docker,
+    PODMAN: podman,
+    CONTAINER_RUNTIME:
+      readEnvKey('CONTAINER_RUNTIME', projectRoot) ||
+      process.env.CONTAINER_RUNTIME ||
+      (docker !== 'not_found' ? 'docker' : podman !== 'not_found' ? 'podman' : 'none'),
     HAS_ENV: hasEnv,
     HAS_AUTH: hasAuth,
     HAS_REGISTERED_GROUPS: hasRegisteredGroups,

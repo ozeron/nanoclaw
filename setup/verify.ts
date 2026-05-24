@@ -4,7 +4,7 @@
  *
  * Uses better-sqlite3 directly (no sqlite3 CLI), platform-aware service checks.
  */
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -15,12 +15,7 @@ import { DATA_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
-import {
-  getPlatform,
-  getServiceManager,
-  hasSystemd,
-  isRoot,
-} from './platform.js';
+import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
 
 export async function run(_args: string[]): Promise<void> {
@@ -38,11 +33,7 @@ export async function run(_args: string[]): Promise<void> {
   // developers with multiple clones), nothing in this checkout is actually
   // wired up. Surface the mismatch directly so the user knows to point the
   // service at the right folder.
-  let service:
-    | 'not_found'
-    | 'stopped'
-    | 'running'
-    | 'running_other_checkout' = 'not_found';
+  let service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout' = 'not_found';
   let runningFromPath: string | null = null;
   const mgr = getServiceManager();
 
@@ -74,10 +65,7 @@ export async function run(_args: string[]): Promise<void> {
       execSync(`${prefix} is-active ${systemdUnit}`, { stdio: 'ignore' });
       service = 'running';
       try {
-        const pidStr = execSync(
-          `${prefix} show ${systemdUnit} -p MainPID --value`,
-          { encoding: 'utf-8' },
-        ).trim();
+        const pidStr = execSync(`${prefix} show ${systemdUnit} -p MainPID --value`, { encoding: 'utf-8' }).trim();
         const pid = Number(pidStr);
         if (Number.isInteger(pid) && pid > 0) {
           runningFromPath = resolveBinaryScript(pid);
@@ -115,11 +103,7 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
-  if (
-    service === 'running' &&
-    runningFromPath &&
-    !isPathInside(runningFromPath, projectRoot)
-  ) {
+  if (service === 'running' && runningFromPath && !isPathInside(runningFromPath, projectRoot)) {
     service = 'running_other_checkout';
   }
 
@@ -133,16 +117,17 @@ export async function run(_args: string[]): Promise<void> {
   } catch {
     // Docker not running
   }
-
-  // 3. Check credentials
-  let credentials = 'missing';
-  const envFile = path.join(projectRoot, '.env');
-  if (fs.existsSync(envFile)) {
-    const envContent = fs.readFileSync(envFile, 'utf-8');
-    if (/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ONECLI_URL)=/m.test(envContent)) {
-      credentials = 'configured';
+  if (containerRuntime === 'none') {
+    try {
+      execSync('podman info', { stdio: 'ignore' });
+      containerRuntime = 'podman';
+    } catch {
+      // Podman not running
     }
   }
+
+  // 3. Check credentials
+  const credentials = codexCredentialsConfigured(projectRoot) ? 'configured' : 'missing';
 
   // 4. Check channel auth (detect configured channels by credentials)
   const envVars = readEnvFile([
@@ -209,11 +194,7 @@ export async function run(_args: string[]): Promise<void> {
 
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
-  if (
-    fs.existsSync(
-      path.join(homeDir, '.config', 'nanoclaw', 'mount-allowlist.json'),
-    )
-  ) {
+  if (fs.existsSync(path.join(homeDir, '.config', 'nanoclaw', 'mount-allowlist.json'))) {
     mountAllowlist = 'configured';
   }
 
@@ -242,14 +223,25 @@ export async function run(_args: string[]): Promise<void> {
   if (status === 'failed') process.exit(1);
 }
 
+function codexCredentialsConfigured(projectRoot: string): boolean {
+  return hasOpenAiApiKey(projectRoot) || codexLoginStatusOk();
+}
+
+function hasOpenAiApiKey(projectRoot: string): boolean {
+  const envFile = path.join(projectRoot, '.env');
+  return fs.existsSync(envFile) && /^OPENAI_API_KEY=/m.test(fs.readFileSync(envFile, 'utf-8'));
+}
+
+function codexLoginStatusOk(): boolean {
+  return spawnSync('codex', ['login', 'status'], { stdio: 'ignore' }).status === 0;
+}
+
 export function determineVerifyStatus(input: {
   service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout';
   credentials: string;
   registeredGroups: number;
 }): 'success' | 'failed' {
-  return input.service === 'running' &&
-    input.credentials !== 'missing' &&
-    input.registeredGroups > 0
+  return input.service === 'running' && input.credentials !== 'missing' && input.registeredGroups > 0
     ? 'success'
     : 'failed';
 }

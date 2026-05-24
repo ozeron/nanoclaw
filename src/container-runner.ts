@@ -211,7 +211,7 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
  *
  *   sessions.agent_provider
  *     → container_configs.provider
- *     → 'claude'
+ *     → 'codex'
  *
  * Pure so the precedence can be unit-tested without a DB or filesystem.
  */
@@ -219,7 +219,7 @@ export function resolveProviderName(
   sessionProvider: string | null | undefined,
   containerConfigProvider: string | null | undefined,
 ): string {
-  return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
+  return (sessionProvider || containerConfigProvider || 'codex').toLowerCase();
 }
 
 function resolveProviderContribution(
@@ -410,6 +410,7 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', 'PATH=/workspace/agent/bin:/pnpm:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games');
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {

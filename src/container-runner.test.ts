@@ -11,8 +11,8 @@ describe('resolveProviderName', () => {
     expect(resolveProviderName(null, 'opencode')).toBe('opencode');
   });
 
-  it('defaults to claude when nothing is set', () => {
-    expect(resolveProviderName(null, undefined)).toBe('claude');
+  it('defaults to codex when nothing is set', () => {
+    expect(resolveProviderName(null, undefined)).toBe('codex');
   });
 
   it('lowercases the resolved name', () => {
@@ -22,6 +22,6 @@ describe('resolveProviderName', () => {
 
   it('treats empty string as unset (falls through)', () => {
     expect(resolveProviderName('', 'opencode')).toBe('opencode');
-    expect(resolveProviderName(null, '')).toBe('claude');
+    expect(resolveProviderName(null, '')).toBe('codex');
   });
 });

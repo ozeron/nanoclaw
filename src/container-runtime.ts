@@ -2,14 +2,27 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
+import { readEnvFile } from './env.js';
 import { log } from './log.js';
 
+type ContainerRuntime = 'docker' | 'podman';
+
+function resolveContainerRuntime(): ContainerRuntime {
+  const env = readEnvFile(['CONTAINER_RUNTIME']);
+  const runtime = (process.env.CONTAINER_RUNTIME || env.CONTAINER_RUNTIME || '').trim();
+  if (runtime === 'docker' || runtime === 'podman') return runtime;
+  if (runtime) throw new Error(`Unsupported CONTAINER_RUNTIME: ${runtime}`);
+  if (spawnSync('docker', ['--version'], { stdio: 'ignore' }).status === 0) return 'docker';
+  if (spawnSync('podman', ['--version'], { stdio: 'ignore' }).status === 0) return 'podman';
+  return 'docker';
+}
+
 /** The container runtime binary name. */
-export const CONTAINER_RUNTIME_BIN = 'docker';
+export const CONTAINER_RUNTIME_BIN: ContainerRuntime = resolveContainerRuntime();
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
@@ -47,8 +60,12 @@ export function ensureContainerRuntimeRunning(): void {
     console.error('║  FATAL: Container runtime failed to start                      ║');
     console.error('║                                                                ║');
     console.error('║  Agents cannot run without a container runtime. To fix:        ║');
-    console.error('║  1. Ensure Docker is installed and running                     ║');
-    console.error('║  2. Run: docker info                                           ║');
+    console.error(
+      `║  1. Ensure ${CONTAINER_RUNTIME_BIN} is installed and running${' '.repeat(Math.max(0, 18 - CONTAINER_RUNTIME_BIN.length))}║`,
+    );
+    console.error(
+      `║  2. Run: ${CONTAINER_RUNTIME_BIN} info${' '.repeat(Math.max(0, 49 - CONTAINER_RUNTIME_BIN.length))}║`,
+    );
     console.error('║  3. Restart NanoClaw                                           ║');
     console.error('╚════════════════════════════════════════════════════════════════╝\n');
     throw new Error('Container runtime is required but failed to start', {

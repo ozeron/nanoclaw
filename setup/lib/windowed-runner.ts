@@ -11,7 +11,7 @@
  * ANSI cursor controls.
  *
  * Stall detection: a silence timer resets on every new line. When it hits
- * STALL_THRESHOLD_MS we pause the render, show `offerClaudeAssist` with
+ * STALL_THRESHOLD_MS we pause the render, show setup assist with
  * the step's raw log, and either resume (user said "keep waiting") or
  * let the step run its course while giving them the exit path.
  */
@@ -182,9 +182,7 @@ async function handleStall(
   render: { pauseRender: () => void; resumeRender: () => void },
 ): Promise<void> {
   render.pauseRender();
-  p.log.warn(
-    brandBody(`This looks stuck — no output from the ${stepName} step for the last 60 seconds.`),
-  );
+  p.log.warn(brandBody(`This looks stuck — no output from the ${stepName} step for the last 60 seconds.`));
   phEmit('step_stalled', { step: stepName });
 
   const { ensureAnswer } = await import('./runner.js');
@@ -192,16 +190,16 @@ async function handleStall(
 
   const choice = ensureAnswer(
     await brightSelect<'wait' | 'help'>({
-      message: "What now?",
+      message: 'What now?',
       options: [
         {
           value: 'wait',
-          label: "Keep waiting",
-          hint: "large images can take 5–10 minutes",
+          label: 'Keep waiting',
+          hint: 'large images can take 5–10 minutes',
         },
         {
           value: 'help',
-          label: 'Ask Claude to take a look',
+          label: 'Ask Codex to take a look',
           hint: 'reads the raw build log and suggests a fix',
         },
       ],
@@ -209,8 +207,8 @@ async function handleStall(
   );
 
   if (choice === 'help') {
-    // offerClaudeAssist runs its own spinner and may propose a fix command.
-    // We don't attempt to restart the stalled build from here — if Claude
+    // offerCodexAssist runs its own spinner and may propose a fix command.
+    // We don't attempt to restart the stalled build from here — if Codex
     // proposes a command the user accepts, they can retry setup afterwards.
     await offerClaudeOnFailure({
       stepName,
@@ -219,7 +217,7 @@ async function handleStall(
       rawLogPath: rawLog,
     });
     // Keep the spinner going — the underlying process is still running,
-    // and cancelling it here would race with Claude's investigation. The
+    // and cancelling it here would race with Codex's investigation. The
     // user can Ctrl-C if they want to bail.
   }
 

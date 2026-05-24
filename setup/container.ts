@@ -7,14 +7,16 @@ import path from 'path';
 import { setTimeout as sleep } from 'timers/promises';
 
 import { log } from '../src/log.js';
+import { readEnvFile } from '../src/env.js';
 import { getDefaultContainerImage } from '../src/install-slug.js';
 import { commandExists, getPlatform } from './platform.js';
 import { emitStatus } from './status.js';
 
-type DockerStatus = 'ok' | 'no-permission' | 'no-daemon' | 'other';
+type ContainerRuntime = 'docker' | 'podman';
+type RuntimeStatus = 'ok' | 'no-permission' | 'no-daemon' | 'other';
 
-function dockerStatus(): DockerStatus {
-  const res = spawnSync('docker', ['info'], { encoding: 'utf-8' });
+function runtimeStatus(runtime: ContainerRuntime): RuntimeStatus {
+  const res = spawnSync(runtime, ['info'], { encoding: 'utf-8' });
   if (res.status === 0) return 'ok';
   const err = `${res.stderr ?? ''}\n${res.stdout ?? ''}`;
   if (/permission denied/i.test(err)) return 'no-permission';
@@ -22,26 +24,24 @@ function dockerStatus(): DockerStatus {
   return 'other';
 }
 
-function dockerRunning(): boolean {
-  return dockerStatus() === 'ok';
-}
-
 /**
- * Try to start Docker if it's installed but idle. Poll up to 60s for the
+ * Try to start Docker/Podman if it's installed but idle. Poll up to 60s for the
  * daemon to come up — but bail immediately if the socket is reachable and
  * only blocked by a group-permission error, since that won't resolve by
  * waiting (the caller handles the sg re-exec for that case).
  */
-async function tryStartDocker(): Promise<DockerStatus> {
+async function tryStartRuntime(runtime: ContainerRuntime): Promise<RuntimeStatus> {
   const platform = getPlatform();
-  log.info('Docker not running — attempting to start', { platform });
+  log.info('Container runtime not running — attempting to start', { runtime, platform });
 
   try {
-    if (platform === 'macos') {
+    if (runtime === 'docker' && platform === 'macos') {
       execSync('open -a Docker', { stdio: 'ignore' });
-    } else if (platform === 'linux') {
+    } else if (runtime === 'docker' && platform === 'linux') {
       // Inherit stdio so sudo can prompt for a password if needed.
       execSync('sudo systemctl start docker', { stdio: 'inherit' });
+    } else if (runtime === 'podman' && platform === 'macos') {
+      execSync('podman machine start', { stdio: 'inherit' });
     } else {
       return 'other';
     }
@@ -52,29 +52,33 @@ async function tryStartDocker(): Promise<DockerStatus> {
 
   for (let i = 0; i < 30; i++) {
     await sleep(2000);
-    const s = dockerStatus();
+    const s = runtimeStatus(runtime);
     if (s === 'ok') {
-      log.info('Docker is up');
+      log.info('Container runtime is up', { runtime });
       return 'ok';
     }
     if (s === 'no-permission') {
-      log.info('Docker daemon is up but socket is not accessible (group membership)');
+      log.info('Container runtime is up but socket is not accessible (group membership)', { runtime });
       return 'no-permission';
     }
   }
-  log.warn('Docker did not become ready within 60s');
+  log.warn('Container runtime did not become ready within 60s', { runtime });
   return 'no-daemon';
 }
 
 function parseArgs(args: string[]): { runtime: string } {
-  // `--runtime` is still accepted for backwards compatibility with the /setup
-  // skill, but `docker` is the only supported value.
-  let runtime = 'docker';
+  const env = readEnvFile(['CONTAINER_RUNTIME']);
+  let runtime = process.env.CONTAINER_RUNTIME || env.CONTAINER_RUNTIME || '';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--runtime' && args[i + 1]) {
       runtime = args[i + 1];
       i++;
     }
+  }
+  if (!runtime) {
+    if (commandExists('docker')) runtime = 'docker';
+    else if (commandExists('podman')) runtime = 'podman';
+    else runtime = 'docker';
   }
   return { runtime };
 }
@@ -85,7 +89,7 @@ export async function run(args: string[]): Promise<void> {
   const image = getDefaultContainerImage(projectRoot);
   const logFile = path.join(projectRoot, 'logs', 'setup.log');
 
-  if (runtime !== 'docker') {
+  if (runtime !== 'docker' && runtime !== 'podman') {
     emitStatus('SETUP_CONTAINER', {
       RUNTIME: runtime,
       IMAGE: image,
@@ -97,8 +101,9 @@ export async function run(args: string[]): Promise<void> {
     });
     process.exit(4);
   }
+  const containerRuntime = runtime as ContainerRuntime;
 
-  if (!commandExists('docker')) {
+  if (containerRuntime === 'docker' && !commandExists('docker')) {
     log.info('Docker not found — running setup/install-docker.sh');
     try {
       execSync('bash setup/install-docker.sh', { cwd: projectRoot, stdio: 'inherit' });
@@ -107,7 +112,7 @@ export async function run(args: string[]): Promise<void> {
     }
   }
 
-  if (!commandExists('docker')) {
+  if (!commandExists(containerRuntime)) {
     emitStatus('SETUP_CONTAINER', {
       RUNTIME: runtime,
       IMAGE: image,
@@ -121,9 +126,9 @@ export async function run(args: string[]): Promise<void> {
   }
 
   {
-    let status = dockerStatus();
+    let status = runtimeStatus(containerRuntime);
     if (status !== 'ok') {
-      status = await tryStartDocker();
+      status = await tryStartRuntime(containerRuntime);
     }
 
     // Socket is unreachable due to group perms — current shell's supplementary
@@ -132,7 +137,12 @@ export async function run(args: string[]): Promise<void> {
     // does this on fresh installs, but skips when Docker is already present),
     // then re-exec under `sg docker` so the child picks up docker as its
     // primary group and can talk to /var/run/docker.sock without a logout.
-    if (status === 'no-permission' && getPlatform() === 'linux' && commandExists('sg')) {
+    if (
+      containerRuntime === 'docker' &&
+      status === 'no-permission' &&
+      getPlatform() === 'linux' &&
+      commandExists('sg')
+    ) {
       // Ensure the current user is in the docker group — without this,
       // sg will ask for the (typically unset) group password and fail.
       const inGroup = spawnSync('id', ['-nG'], { encoding: 'utf-8' });
@@ -146,15 +156,14 @@ export async function run(args: string[]): Promise<void> {
       log.info('Re-executing container step under `sg docker`');
       const res = spawnSync(
         'sg',
-        ['docker', '-c', 'pnpm exec tsx setup/index.ts --step container'],
+        ['docker', '-c', 'pnpm exec tsx setup/index.ts --step container -- --runtime docker'],
         { cwd: projectRoot, stdio: 'inherit' },
       );
       process.exit(res.status ?? 1);
     }
 
     if (status !== 'ok') {
-      const error =
-        status === 'no-permission' ? 'docker_group_not_active' : 'runtime_not_available';
+      const error = status === 'no-permission' ? 'docker_group_not_active' : 'runtime_not_available';
       emitStatus('SETUP_CONTAINER', {
         RUNTIME: runtime,
         IMAGE: image,
@@ -168,8 +177,8 @@ export async function run(args: string[]): Promise<void> {
     }
   }
 
-  const buildCmd = 'docker build';
-  const runCmd = 'docker';
+  const buildCmd = `${containerRuntime} build`;
+  const runCmd = containerRuntime;
 
   // Build-args from .env. Only INSTALL_CJK_FONTS is passed through today.
   // Keeps /setup and ./container/build.sh in sync — both read the same source.
@@ -179,7 +188,10 @@ export async function run(args: string[]): Promise<void> {
     const envPath = path.join(projectRoot, '.env');
     if (fs.existsSync(envPath)) {
       const match = fs.readFileSync(envPath, 'utf-8').match(/^INSTALL_CJK_FONTS=(.+)$/m);
-      const val = match?.[1].trim().replace(/^["']|["']$/g, '').toLowerCase();
+      const val = match?.[1]
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .toLowerCase();
       if (val === 'true') buildArgs.push('--build-arg INSTALL_CJK_FONTS=true');
     }
   } catch {
@@ -194,13 +206,7 @@ export async function run(args: string[]): Promise<void> {
   log.info('Building container', { runtime, buildArgs });
   const buildRes = spawnSync(
     buildCmd.split(' ')[0],
-    [
-      ...buildCmd.split(' ').slice(1),
-      ...buildArgs.flatMap((a) => a.split(' ')),
-      '-t',
-      image,
-      '.',
-    ],
+    [...buildCmd.split(' ').slice(1), ...buildArgs.flatMap((a) => a.split(' ')), '-t', image, '.'],
     {
       cwd: path.join(projectRoot, 'container'),
       stdio: 'inherit',
@@ -217,16 +223,19 @@ export async function run(args: string[]): Promise<void> {
   let testOk = false;
   if (buildOk) {
     log.info('Testing container');
-    try {
-      const output = execSync(
-        `echo '{}' | ${runCmd} run -i --rm --entrypoint /bin/echo ${image} "Container OK"`,
-        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-      testOk = output.includes('Container OK');
-      log.info('Container test result', { testOk });
-    } catch {
-      log.error('Container test failed');
-    }
+    const testRes = spawnSync(runCmd, ['run', '-i', '--rm', '--entrypoint', '/bin/echo', image, 'Container OK'], {
+      input: '{}',
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    testOk = testRes.status === 0 && (testRes.stdout ?? '').includes('Container OK');
+    log.info('Container test result', {
+      testOk,
+      exitCode: testRes.status,
+      signal: testRes.signal,
+      error: testRes.error?.message,
+      stderr: testRes.stderr?.toString().trim(),
+    });
   }
 
   const status = buildOk && testOk ? 'success' : 'failed';

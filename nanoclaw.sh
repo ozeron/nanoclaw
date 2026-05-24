@@ -17,17 +17,27 @@
 #
 # Config via env — passed through unchanged:
 #   NANOCLAW_SKIP  comma-separated setup:auto step names to skip
-#   SECRET_NAME    OneCLI secret name (default: Anthropic)
-#   HOST_PATTERN   OneCLI host pattern (default: api.anthropic.com)
+#   OPENAI_API_KEY Optional Codex API key when not using ChatGPT login
 
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+if [ -d /opt/homebrew/bin ] && [[ ":$PATH:" != *":/opt/homebrew/bin:"* ]]; then
+  export PATH="/opt/homebrew/bin:$PATH"
+fi
+if [ -d /usr/local/bin ] && [[ ":$PATH:" != *":/usr/local/bin:"* ]]; then
+  export PATH="/usr/local/bin:$PATH"
+fi
+
 LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"
 PROGRESS_LOG="$LOGS_DIR/setup.log"
+MISE_READY=false
 
 # Diagnostics: persisted install-id + fire-and-forget emit. Sourced early
 # so `setup_launched` covers dropoff before bootstrap even starts.
@@ -94,6 +104,42 @@ write_abort_entry() {
   local ts
   ts=$(ts_utc)
   echo "## ${ts} · aborted at ${step} (${error})" >> "$PROGRESS_LOG"
+}
+
+prepare_mise_toolchain() {
+  [ -f "$PROJECT_ROOT/.mise.toml" ] || return 0
+
+  if ! command -v mise >/dev/null 2>&1; then
+    if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+      echo "mise not found — installing with Homebrew" >> "$PROGRESS_LOG"
+      brew install mise >> "$STEPS_DIR/00-mise.log" 2>&1 || true
+      hash -r 2>/dev/null || true
+    fi
+  fi
+
+  if ! command -v mise >/dev/null 2>&1; then
+    echo "mise not found — falling back to legacy Node/pnpm bootstrap" >> "$PROGRESS_LOG"
+    return 0
+  fi
+
+  {
+    echo "=== [$(ts_utc)] mise toolchain ==="
+    mise trust "$PROJECT_ROOT/.mise.toml"
+    mise install
+    mise exec -- node -v
+    mise exec -- pnpm -v
+    mise exec -- bun -v
+  } >> "$STEPS_DIR/00-mise.log" 2>&1
+
+  MISE_READY=true
+}
+
+run_with_toolchain() {
+  if [ "$MISE_READY" = true ]; then
+    mise exec -- "$@"
+  else
+    "$@"
+  fi
 }
 
 # ─── bash-side "clack-alike" status line ────────────────────────────────
@@ -295,6 +341,8 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   esac
 fi
 
+prepare_mise_toolchain
+
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
@@ -310,7 +358,7 @@ BOOTSTRAP_EXIT_FILE=$(mktemp -t nanoclaw-bootstrap-exit.XXXXXX)
   # setup.sh's legacy `log()` writes to a file; point it at the raw log
   # so its verbose entries land alongside the stdout we're capturing.
   export NANOCLAW_BOOTSTRAP_LOG="$BOOTSTRAP_RAW"
-  if bash setup.sh > "$BOOTSTRAP_RAW" 2>&1; then
+  if run_with_toolchain bash setup.sh > "$BOOTSTRAP_RAW" 2>&1; then
     echo 0 > "$BOOTSTRAP_EXIT_FILE"
   else
     echo $? > "$BOOTSTRAP_EXIT_FILE"
@@ -359,7 +407,7 @@ export NANOCLAW_BOOTSTRAPPED=1
 # our PATH (custom `npm config set prefix`, or the default prefix missing
 # from the shell's login PATH). Its PATH mutation doesn't propagate back
 # to us — so replay the same lookup here before the exec.
-if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+if [ "$MISE_READY" != true ] && ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
   NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
   if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pnpm" ]; then
     export PATH="$NPM_PREFIX/bin:$PATH"
@@ -370,4 +418,8 @@ fi
 # preamble so the flow continues visually from "Basics installed" straight
 # into setup:auto's spinner. exec so signals (Ctrl-C) propagate directly.
 # `-- "$@"` forwards any flags (e.g. --onecli-api-host) to setup:auto.
-exec pnpm --silent run setup:auto -- "$@"
+if [ "$MISE_READY" = true ]; then
+  exec mise exec -- pnpm --silent run setup:auto -- "$@"
+else
+  exec pnpm --silent run setup:auto -- "$@"
+fi

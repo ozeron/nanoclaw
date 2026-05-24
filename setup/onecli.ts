@@ -11,7 +11,7 @@
  * Emits ONECLI_URL and polls /health so downstream steps (auth, service)
  * get a ready gateway.
  */
-import { execFileSync, execSync } from 'child_process';
+import { execFileSync, execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -20,6 +20,7 @@ import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
+type ContainerRuntime = 'docker' | 'podman';
 
 function childEnv(): NodeJS.ProcessEnv {
   const parts = [LOCAL_BIN];
@@ -102,6 +103,63 @@ function writeEnvOnecliUrl(url: string): void {
   writeEnvVar('ONECLI_URL', url);
 }
 
+function commandExists(cmd: string): boolean {
+  return spawnSync(cmd, ['--version'], { stdio: 'ignore' }).status === 0;
+}
+
+function selectedContainerRuntime(): ContainerRuntime {
+  const configured = (process.env.CONTAINER_RUNTIME || readEnvVar('CONTAINER_RUNTIME') || '').trim();
+  if (configured === 'docker' || configured === 'podman') return configured;
+  if (commandExists('docker')) return 'docker';
+  if (commandExists('podman')) return 'podman';
+  return 'docker';
+}
+
+function readEnvVar(name: string): string | null {
+  const envFile = path.join(process.cwd(), '.env');
+  if (!fs.existsSync(envFile)) return null;
+  const content = fs.readFileSync(envFile, 'utf-8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 1 || trimmed.slice(0, eq) !== name) continue;
+    return trimmed.slice(eq + 1).trim() || null;
+  }
+  return null;
+}
+
+function composeBaseArgs(runtime: ContainerRuntime): string[] {
+  const composeFile = path.join(os.homedir(), '.onecli', 'docker-compose.yml');
+  return ['compose', '-p', 'onecli', '-f', composeFile];
+}
+
+function runCompose(runtime: ContainerRuntime, args: string[], env: NodeJS.ProcessEnv): string {
+  return execFileSync(runtime, [...composeBaseArgs(runtime), ...args], {
+    encoding: 'utf-8',
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function detectBindHost(runtime: ContainerRuntime): string | null {
+  if (process.env.ONECLI_BIND_HOST) return process.env.ONECLI_BIND_HOST;
+  if (process.platform === 'darwin') return '127.0.0.1';
+  if (fs.existsSync('/proc/sys/fs/binfmt_misc/WSLInterop')) return '127.0.0.1';
+  if (runtime === 'docker') {
+    try {
+      const out = execSync(
+        'ip -4 addr show docker0 2>/dev/null | awk \'/inet / {split($2, a, "/"); print a[1]; exit}\'',
+        { encoding: 'utf-8' },
+      ).trim();
+      if (out) return out;
+    } catch {
+      // fall through
+    }
+  }
+  return '127.0.0.1';
+}
+
 // Last-known-good CLI release. Used only if BOTH the upstream installer
 // and the redirect-based version probe fail. Bump deliberately when a
 // new CLI release ships.
@@ -121,12 +179,20 @@ function installOnecliCliOnly(): { stdout: string; ok: boolean } {
 // v2 uses "onecli". Compose flags the old container as an orphan but won't
 // stop it without --remove-orphans, leaving port 10254 bound and crashing
 // the new bring-up. Filed upstream; this is the downstream workaround.
-function removeLegacyOnecliContainers(): string {
+function removeLegacyOnecliContainers(runtime: ContainerRuntime): string {
   const out: string[] = [];
   let list = '';
   try {
-    list = execSync(
-      `docker ps -a --filter "label=com.docker.compose.project=onecli" --format '{{.Names}}|{{.Label "com.docker.compose.service"}}'`,
+    list = execFileSync(
+      runtime,
+      [
+        'ps',
+        '-a',
+        '--filter',
+        'label=com.docker.compose.project=onecli',
+        '--format',
+        '{{.Names}}|{{.Label "com.docker.compose.service"}}',
+      ],
       { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
     ).trim();
   } catch {
@@ -139,7 +205,7 @@ function removeLegacyOnecliContainers(): string {
     if (!name || !service || v2Services.has(service)) continue;
     out.push(`Removing legacy OneCLI container: ${name} (service=${service})`);
     try {
-      execSync(`docker rm -f ${JSON.stringify(name)}`, { stdio: ['ignore', 'pipe', 'pipe'] });
+      execFileSync(runtime, ['rm', '-f', name], { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
       out.push(`  rm failed (continuing): ${(err as Error).message}`);
     }
@@ -149,12 +215,12 @@ function removeLegacyOnecliContainers(): string {
 
 function installOnecli(): { stdout: string; ok: boolean } {
   let stdout = '';
+  const runtime = selectedContainerRuntime();
 
-  const cleanup = removeLegacyOnecliContainers();
+  const cleanup = removeLegacyOnecliContainers(runtime);
   if (cleanup) stdout += cleanup + '\n';
 
-  // Gateway install (docker-compose based, no rate-limit concerns).
-  const gw = runInstall(`export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | sh`);
+  const gw = installOnecliGateway(runtime);
   stdout += gw.stdout;
   if (!gw.ok) {
     log.error('OneCLI gateway install failed', { stderr: gw.stderr });
@@ -182,6 +248,66 @@ function installOnecli(): { stdout: string; ok: boolean } {
     return { stdout, ok: false };
   }
   return { stdout, ok: true };
+}
+
+function installOnecliGateway(runtime: ContainerRuntime): { stdout: string; stderr?: string; ok: boolean } {
+  if (runtime === 'docker') {
+    return runInstall(`export ONECLI_VERSION=${ONECLI_GATEWAY_VERSION} && curl -fsSL onecli.sh/install | sh`);
+  }
+
+  const lines: string[] = [];
+  const installDir = path.join(os.homedir(), '.onecli');
+  const composeFile = path.join(installDir, 'docker-compose.yml');
+  const bindHost = detectBindHost(runtime);
+  if (!bindHost) {
+    return { stdout: '', stderr: 'Could not determine ONECLI_BIND_HOST', ok: false };
+  }
+
+  try {
+    fs.mkdirSync(installDir, { recursive: true });
+    lines.push('OneCLI: give your agents access, not your secrets.');
+    lines.push(`Bind host: ${bindHost}`);
+    lines.push(`Version: ${ONECLI_GATEWAY_VERSION}`);
+    lines.push('Downloading docker-compose.yml...');
+    execFileSync(
+      'curl',
+      ['-fsSL', 'https://raw.githubusercontent.com/onecli/onecli/main/docker/docker-compose.yml', '-o', composeFile],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+
+    const env = {
+      ...process.env,
+      ONECLI_BIND_HOST: bindHost,
+      ONECLI_VERSION: ONECLI_GATEWAY_VERSION,
+    };
+
+    try {
+      const ps = runCompose(runtime, ['ps', '-q'], env).trim();
+      if (ps) {
+        lines.push('Stopping existing OneCLI services...');
+        runCompose(runtime, ['down'], env);
+      }
+    } catch {
+      // Existing services are optional.
+    }
+
+    lines.push('Pulling latest images...');
+    runCompose(runtime, ['pull'], env);
+    lines.push('Starting OneCLI...');
+    runCompose(runtime, ['up', '-d', '--wait'], env);
+
+    lines.push('');
+    lines.push('OneCLI is running!');
+    lines.push(`ONECLI_URL:  http://${bindHost}:${process.env.ONECLI_APP_PORT || '10254'}`);
+    lines.push(`Dashboard:  http://${bindHost}:${process.env.ONECLI_APP_PORT || '10254'}`);
+    lines.push(`Gateway:    http://${bindHost}:${process.env.ONECLI_GATEWAY_PORT || '10255'}`);
+    lines.push(`Compose file: ${composeFile}`);
+    return { stdout: lines.join('\n'), ok: true };
+  } catch (err) {
+    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
+    const stderr = e.stderr?.toString() || e.message || String(err);
+    return { stdout: lines.join('\n') + '\n' + (e.stdout?.toString() ?? ''), stderr, ok: false };
+  }
 }
 
 function runInstall(cmd: string): { stdout: string; stderr?: string; ok: boolean } {

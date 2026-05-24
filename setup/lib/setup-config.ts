@@ -59,8 +59,7 @@ interface IntEntry extends BaseEntry {
 
 export type Entry = StringEntry | EnumEntry | BoolEntry | IntEntry;
 
-const httpUrl = (v: string): string | undefined =>
-  /^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…';
+const httpUrl = (v: string): string | undefined => (/^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…');
 
 export const CONFIG: Entry[] = [
   {
@@ -86,21 +85,21 @@ export const CONFIG: Entry[] = [
     validate: (v) => (v.startsWith('oc_') ? undefined : 'Must start with oc_'),
   },
   {
-    key: 'anthropicBaseUrl',
-    label: 'Anthropic API base URL',
-    help: 'Use a proxy or alternative endpoint instead of api.anthropic.com.',
+    key: 'openaiBaseUrl',
+    label: 'OpenAI API base URL',
+    help: 'Use a proxy or alternative endpoint instead of api.openai.com.',
     surface: 'flag+ui',
-    group: 'Anthropic',
+    group: 'Codex',
     type: 'url',
-    placeholder: 'https://api.anthropic.com',
+    placeholder: 'https://api.openai.com',
     validate: httpUrl,
   },
   {
-    key: 'anthropicAuthToken',
-    label: 'Anthropic auth token',
-    help: 'Bearer token for the custom Anthropic endpoint. Used together with --anthropic-base-url.',
+    key: 'openaiApiKey',
+    label: 'OpenAI API key',
+    help: 'API key for Codex. Used together with --openai-base-url for custom endpoints.',
     surface: 'flag+ui',
-    group: 'Anthropic',
+    group: 'Codex',
     type: 'string',
     secret: true,
     validate: (v) => (v.trim() ? undefined : 'Required'),
@@ -127,7 +126,7 @@ export const CONFIG: Entry[] = [
     key: 'assistMode',
     envVar: 'NANOCLAW_SETUP_ASSIST_MODE',
     label: 'Assist mode',
-    help: 'Use non-interactive Claude assist on failure instead of interactive handoff.',
+    help: 'Use Codex assist on failure.',
     surface: 'flag',
     type: 'boolean',
     default: false,

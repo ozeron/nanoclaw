@@ -18,8 +18,8 @@
  *                           verify|first-chat)
  *
  * Timezone is auto-detected after the CLI agent step. UTC resolves are
- * confirmed with the user, and free-text replies fall through to a
- * headless `claude -p` call for IANA-zone resolution.
+ * confirmed with the user, and free-text replies fall through to an
+ * LLM helper for IANA-zone resolution.
  */
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
@@ -39,23 +39,29 @@ import { runTelegramChannel } from './channels/telegram.js';
 import { runWhatsAppChannel } from './channels/whatsapp.js';
 import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
 import { brightSelect } from './lib/bright-select.js';
+import { ensureCodexReady } from './lib/claude-assist.js';
 import { offerClaudeOnFailure } from './lib/claude-handoff.js';
-import {
-  applyToEnv,
-  parseFlags,
-  printHelp,
-  readFromEnv,
-} from './lib/setup-config-parse.js';
+import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
-import { detectRegisteredGroups, detectExistingDisplayName } from './environment.js';
+import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
-import { accentGreen, brandBody, brandBold, brandChip, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
+import {
+  accentGreen,
+  brandBody,
+  brandBold,
+  brandChip,
+  dimWrap,
+  fitToWidth,
+  fmtDuration,
+  note,
+  wrapForGutter,
+} from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
 
 const CLI_AGENT_NAME = 'Terminal Agent';
@@ -65,7 +71,7 @@ type ChannelChoice = 'telegram' | 'discord' | 'whatsapp' | 'signal' | 'teams' | 
 
 async function main(): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
-  // Installers we run mid-setup (OneCLI, claude) drop binaries there and
+  // Installers we run mid-setup (OneCLI, Codex) drop binaries there and
   // append a PATH line to the user's shell rc, but rc updates don't reach
   // an already-running Node process — so without this patch a freshly
   // installed `onecli` is invisible to a subsequent `runInheritScript`.
@@ -136,7 +142,9 @@ async function main(): Promise<void> {
   }
 
   if (!skip.has('container')) {
-    p.log.message(brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)));
+    p.log.message(
+      brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
+    );
     p.log.message(
       brandBody(
         dimWrap(
@@ -155,8 +163,8 @@ async function main(): Promise<void> {
       if (err === 'runtime_not_available') {
         await fail(
           'container',
-          "Docker isn't available.",
-          'Install Docker Desktop (or start it if already installed), then retry.',
+          'No container runtime is available.',
+          'Install or start Docker/Podman, or set CONTAINER_RUNTIME=podman, then retry.',
         );
       }
       if (err === 'docker_group_not_active') {
@@ -169,7 +177,7 @@ async function main(): Promise<void> {
       await fail(
         'container',
         "Couldn't build the sandbox.",
-        'If Docker has a stale cache, try: `docker builder prune -f`, then retry.',
+        'If the container cache is stale, try `docker builder prune -f` or `podman builder prune -f`, then retry.',
       );
     }
     maybeReexecUnderSg();
@@ -252,9 +260,7 @@ async function main(): Promise<void> {
       const res = await runQuietStep(
         'onecli',
         {
-          running: reuse
-            ? 'Hooking up to your existing OneCLI…'
-            : "Setting up OneCLI, your agent's vault…",
+          running: reuse ? 'Hooking up to your existing OneCLI…' : "Setting up OneCLI, your agent's vault…",
           done: 'OneCLI vault ready.',
         },
         reuse ? ['--reuse'] : [],
@@ -401,7 +407,15 @@ async function main(): Promise<void> {
           const createRes = await runQuietChild(
             'create-terminal-agent',
             'pnpm',
-            ['exec', 'tsx', 'scripts/init-cli-agent.ts', '--display-name', displayName!, '--agent-name', terminalAgentName],
+            [
+              'exec',
+              'tsx',
+              'scripts/init-cli-agent.ts',
+              '--display-name',
+              displayName!,
+              '--agent-name',
+              terminalAgentName,
+            ],
             { running: `Creating ${terminalAgentName}…`, done: `${terminalAgentName} is ready.` },
           );
           if (!createRes.ok) {
@@ -492,7 +506,7 @@ async function main(): Promise<void> {
     if (!res.ok) {
       const notes: string[] = [];
       if (res.terminal?.fields.CREDENTIALS !== 'configured') {
-        notes.push("• Your Claude account isn't connected. Re-run setup and try again.");
+        notes.push("• Codex isn't connected. Re-run setup and try again.");
       }
       const service = res.terminal?.fields.SERVICE;
       if (service === 'running_other_checkout') {
@@ -542,7 +556,7 @@ async function main(): Promise<void> {
   const rows: [string, string][] = [
     ['Chat in the terminal:', 'pnpm run chat hi'],
     ["See what's happening:", 'tail -f logs/nanoclaw.log'],
-    ['Open Claude Code:', 'claude'],
+    ['Open Codex:', 'codex'],
   ];
   const labelWidth = Math.max(...rows.map(([l]) => l.length));
   const nextSteps = rows.map(([l, c]) => `${k.cyan(l.padEnd(labelWidth))}  ${c}`).join('\n');
@@ -705,57 +719,48 @@ function sendChatMessage(message: string): Promise<void> {
 // ─── auth step (select → branch) ────────────────────────────────────────
 
 async function runAuthStep(): Promise<void> {
-  if (anthropicSecretExists()) {
-    p.log.success(brandBody('Your Claude account is already connected.'));
+  if (codexAuthAvailable()) {
+    p.log.success(brandBody('Codex is already connected.'));
     setupLog.step('auth', 'skipped', 0, { REASON: 'secret-already-present' });
     return;
   }
 
-  // Custom Anthropic-compatible endpoint flow. Both URL and token must be set;
-  // OneCLI stores the token as a generic Bearer secret keyed to the URL host,
-  // so the container only ever sees ANTHROPIC_BASE_URL + a placeholder.
-  const customBaseUrl = process.env.NANOCLAW_ANTHROPIC_BASE_URL?.trim();
-  const customAuthToken = process.env.NANOCLAW_ANTHROPIC_AUTH_TOKEN?.trim();
+  const customBaseUrl = process.env.NANOCLAW_OPENAI_BASE_URL?.trim();
+  const customAuthToken = process.env.NANOCLAW_OPENAI_API_KEY?.trim();
   if (customBaseUrl && customAuthToken) {
-    await runCustomEndpointAuth(customBaseUrl, customAuthToken);
+    await runCustomOpenAiAuth(customBaseUrl, customAuthToken);
     return;
   }
 
   const method = ensureAnswer(
     await brightSelect({
-      message: 'How would you like to connect to Claude?',
+      message: 'How would you like to connect to Codex?',
       options: [
         {
           value: 'subscription',
-          label: 'Sign in with my Claude subscription',
-          hint: 'recommended if you have Pro or Max',
-        },
-        {
-          value: 'oauth',
-          label: 'Paste an OAuth token I already have',
-          hint: 'sk-ant-oat…',
+          label: 'Sign in with ChatGPT',
+          hint: 'recommended if you have a ChatGPT plan',
         },
         {
           value: 'api',
-          label: 'Paste an Anthropic API key',
-          hint: 'pay-per-use via console.anthropic.com',
+          label: 'Paste an OpenAI API key',
+          hint: 'pay-per-use via platform.openai.com',
         },
         {
           value: 'skip',
           label: "Skip — I'll connect later",
-          hint: 'not recommended — Claude helps debug setup issues',
+          hint: 'not recommended — the agent needs Codex auth to run',
         },
       ],
     }),
-  ) as 'subscription' | 'oauth' | 'api' | 'skip';
+  ) as 'subscription' | 'api' | 'skip';
   setupLog.userInput('auth_method', method);
   phEmit('auth_method_chosen', { method });
 
   if (method === 'skip') {
     const confirmed = ensureAnswer(
       await p.confirm({
-        message:
-          "Skip Claude sign-in? The agent won't be able to run until you connect, and we won't be able to help debug setup errors.",
+        message: "Skip Codex sign-in? The agent won't be able to run until you connect.",
         initialValue: false,
       }),
     );
@@ -764,170 +769,72 @@ async function runAuthStep(): Promise<void> {
       return runAuthStep();
     }
     setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped' });
-    p.log.warn(
-      brandBody(
-        'Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.',
-      ),
-    );
+    p.log.warn(brandBody('Codex sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.'));
     return;
   }
 
   if (method === 'subscription') {
-    await runSubscriptionAuth();
+    await runCodexSubscriptionAuth();
   } else {
-    await runPasteAuth(method);
+    await runOpenAiKeyAuth();
   }
 }
 
-async function runSubscriptionAuth(): Promise<void> {
-  p.log.step(brandBody('Opening the Claude sign-in flow…'));
+async function runCodexSubscriptionAuth(): Promise<void> {
+  p.log.step(brandBody('Opening the Codex sign-in flow…'));
   console.log(k.dim('   (a browser will open for sign-in; this part is interactive)'));
   console.log();
   const start = Date.now();
-  const code = await runInheritScript('bash', ['setup/register-claude-token.sh']);
+  const ok = await ensureCodexReady();
   const durationMs = Date.now() - start;
   console.log();
-  if (code !== 0) {
+  if (!ok) {
     setupLog.step('auth', 'failed', durationMs, {
-      EXIT_CODE: code,
       METHOD: 'subscription',
     });
     await fail(
       'auth',
-      "Couldn't complete the Claude sign-in.",
-      'Re-run setup and try again, or choose a paste option instead.',
+      "Couldn't complete the Codex sign-in.",
+      'Re-run setup and try again, or choose the API key option instead.',
     );
   }
   setupLog.step('auth', 'interactive', durationMs, { METHOD: 'subscription' });
-  p.log.success(brandBody('Claude account connected.'));
+  p.log.success(brandBody('Codex account connected.'));
 }
 
-async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
-  const label = method === 'oauth' ? 'OAuth token' : 'API key';
-  const prefix = method === 'oauth' ? 'sk-ant-oat' : 'sk-ant-api';
-
+async function runOpenAiKeyAuth(): Promise<void> {
   const answer = ensureAnswer(
     await p.password({
-      message: `Paste your ${label}`,
+      message: 'Paste your OpenAI API key',
       clearOnError: true,
       validate: (v) => {
-        // Strip any internal whitespace so a line-wrapped paste that did
-        // survive into clack can still validate. The mid-token-newline
-        // case where clack only sees the first line is caught by the
-        // shape check below.
         const cleaned = (v ?? '').replace(/\s+/g, '');
         if (!cleaned) return 'Required';
-        if (!cleaned.startsWith(prefix)) {
-          return `Should start with ${prefix}…`;
-        }
-        if (method === 'oauth' && !/^sk-ant-oat[A-Za-z0-9_-]{80,500}AA$/.test(cleaned)) {
-          return cleaned.length < 90
-            ? 'Token looks truncated — line breaks in the paste can cut it off. Widen your terminal so the token fits on one line, then paste again.'
-            : "Token shape doesn't look right (expected sk-ant-oat…AA).";
+        if (!cleaned.startsWith('sk-') || cleaned.length < 20) {
+          return 'That does not look like an OpenAI API key.';
         }
         return undefined;
       },
     }),
   );
   const token = (answer as string).replace(/\s+/g, '');
-
-  const res = await runQuietChild(
-    'auth',
-    'onecli',
-    [
-      'secrets',
-      'create',
-      '--name',
-      'Anthropic',
-      '--type',
-      'anthropic',
-      '--value',
-      token,
-      '--host-pattern',
-      'api.anthropic.com',
-    ],
-    {
-      running: `Saving your ${label} to your OneCLI vault…`,
-      done: 'Claude account connected.',
-    },
-    {
-      extraFields: { METHOD: method },
-    },
-  );
-  if (!res.ok) {
-    await fail(
-      'auth',
-      `Couldn't save your ${label} to the vault.`,
-      'Make sure OneCLI is running (`onecli version`), then retry.',
-    );
-  }
+  writeEnvLine('OPENAI_API_KEY', token);
+  setupLog.step('auth', 'interactive', 0, { METHOD: 'api' });
+  p.log.success(brandBody('OpenAI API key saved for Codex.'));
 }
 
-/**
- * Set up Anthropic auth for a custom endpoint. The token is stored as a
- * OneCLI generic secret with header injection so the proxy rewrites the
- * Authorization header on the wire — the container only ever sees
- * ANTHROPIC_BASE_URL + a placeholder bearer.
- */
-async function runCustomEndpointAuth(
-  baseUrl: string,
-  token: string,
-): Promise<void> {
-  let host: string;
+async function runCustomOpenAiAuth(baseUrl: string, token: string): Promise<void> {
   try {
-    host = new URL(baseUrl).hostname;
+    new URL(baseUrl);
   } catch {
-    await fail(
-      'auth',
-      `Invalid Anthropic base URL: ${baseUrl}`,
-      'Check --anthropic-base-url and retry.',
-    );
+    await fail('auth', `Invalid OpenAI base URL: ${baseUrl}`, 'Check NANOCLAW_OPENAI_BASE_URL and retry.');
     return;
   }
 
-  const res = await runQuietChild(
-    'auth',
-    'onecli',
-    [
-      'secrets',
-      'create',
-      '--name',
-      'Anthropic',
-      '--type',
-      'generic',
-      '--value',
-      token,
-      '--host-pattern',
-      host,
-      '--header-name',
-      'Authorization',
-      '--value-format',
-      'Bearer {value}',
-    ],
-    {
-      running: `Saving your Anthropic auth token to your OneCLI vault…`,
-      done: 'Claude account connected.',
-    },
-    { extraFields: { METHOD: 'custom-endpoint', HOST: host } },
-  );
-  if (!res.ok) {
-    await fail(
-      'auth',
-      `Couldn't save your Anthropic auth token to the vault.`,
-      'Make sure OneCLI is running (`onecli version`), then retry.',
-    );
-  }
-
-  // ANTHROPIC_BASE_URL has to be in .env so the runtime provider config
-  // reads it when building container env. The token is *not* written —
-  // OneCLI holds it.
-  writeEnvLine('ANTHROPIC_BASE_URL', baseUrl);
-
-  // Register the claude provider so the runtime passes ANTHROPIC_BASE_URL
-  // and the placeholder bearer into the container. Only appended when the
-  // user has configured a custom endpoint; standard installs don't load
-  // the file at all.
-  appendProviderImport('./claude.js');
+  writeEnvLine('OPENAI_BASE_URL', baseUrl);
+  writeEnvLine('OPENAI_API_KEY', token);
+  setupLog.step('auth', 'interactive', 0, { METHOD: 'custom-openai-endpoint' });
+  p.log.success(brandBody('Codex auth configured.'));
 }
 
 function writeEnvLine(key: string, value: string): void {
@@ -1148,7 +1055,10 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
       placeholder: 'e.g. matrix, github, linear, webex',
     }),
   );
-  const name = (answer as string).trim().toLowerCase().replace(/^\/?(add-)?/, '');
+  const name = (answer as string)
+    .trim()
+    .toLowerCase()
+    .replace(/^\/?(add-)?/, '');
   setupLog.userInput('other_channel', name);
   phEmit('channel_other_named', { channel: name });
   p.log.info(
@@ -1171,17 +1081,27 @@ function ensureLocalBinOnPath(): void {
   process.env.PATH = current ? `${localBin}${path.delimiter}${current}` : localBin;
 }
 
-function anthropicSecretExists(): boolean {
-  try {
-    const res = spawnSync('onecli', ['secrets', 'list'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (res.status !== 0) return false;
-    return /anthropic/i.test(res.stdout ?? '');
-  } catch {
-    return false;
-  }
+function codexAuthAvailable(): boolean {
+  if (persistShellOpenAiEnv()) return true;
+  if (readEnvKey('OPENAI_API_KEY')) return true;
+  return codexLoginStatusOk();
+}
+
+function persistShellOpenAiEnv(): boolean {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return false;
+
+  persistEnvIfMissing('OPENAI_API_KEY', apiKey);
+  persistEnvIfMissing('OPENAI_BASE_URL', process.env.OPENAI_BASE_URL?.trim());
+  return true;
+}
+
+function persistEnvIfMissing(key: string, value: string | undefined): void {
+  if (value && !readEnvKey(key)) writeEnvLine(key, value);
+}
+
+function codexLoginStatusOk(): boolean {
+  return spawnSync('codex', ['login', 'status'], { stdio: 'ignore' }).status === 0;
 }
 
 /**
@@ -1248,7 +1168,10 @@ function maybeReexecUnderSg(): void {
   if (spawnSync('which', ['sg'], { stdio: 'ignore' }).status !== 0) return;
 
   p.log.warn(brandBody('Docker socket not accessible in current group. Re-executing under `sg docker`.'));
-  const existingSkip = (process.env.NANOCLAW_SKIP ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const existingSkip = (process.env.NANOCLAW_SKIP ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const skipList = [...new Set([...existingSkip, ...setupLog.completedStepNames()])].join(',');
   const res = spawnSync('sg', ['docker', '-c', 'pnpm run setup:auto'], {
     stdio: 'inherit',

@@ -12,9 +12,13 @@ vi.mock('./log.js', () => ({
 }));
 
 // Mock child_process — store the mock fn so tests can configure it
-const mockExecSync = vi.fn();
+const { mockExecSync, mockSpawnSync } = vi.hoisted(() => ({
+  mockExecSync: vi.fn(),
+  mockSpawnSync: vi.fn((..._args: unknown[]) => ({ status: 0 })),
+}));
 vi.mock('child_process', () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
+  spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
 }));
 
 import {
@@ -29,6 +33,7 @@ import { log } from './log.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockSpawnSync.mockReturnValue({ status: 0 });
 });
 
 // --- Pure functions ---

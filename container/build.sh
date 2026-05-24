@@ -19,6 +19,12 @@ cd "$SCRIPT_DIR"
 source "$PROJECT_ROOT/setup/lib/install-slug.sh"
 IMAGE_NAME="$(container_image_base)"
 TAG="${1:-latest}"
+
+# Caller's env takes precedence; fall back to .env. This keeps the direct
+# developer build path aligned with setup/container.ts on Docker, Podman, etc.
+if [ -z "${CONTAINER_RUNTIME:-}" ] && [ -f "../.env" ]; then
+    CONTAINER_RUNTIME="$(grep '^CONTAINER_RUNTIME=' ../.env | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+fi
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 
 # Caller's env takes precedence; fall back to .env.
