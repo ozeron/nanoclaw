@@ -47,7 +47,7 @@ import { runWindowedStep } from './lib/windowed-runner.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
-import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
+import { codexCliAvailable, resolveTimezoneViaCodex } from './lib/tz-from-codex.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
@@ -862,7 +862,7 @@ function appendProviderImport(modulePath: string): void {
  * Auto-detect TZ, confirm with the user when it comes back as UTC (a
  * common sign we're on a VPS that wasn't localised), and persist through
  * the usual `--step timezone -- --tz <zone>` path. Free-text answers get
- * a headless `claude -p` pass to resolve them to a real IANA zone.
+ * a headless Codex pass to resolve them to a real IANA zone.
  */
 async function runTimezoneStep(): Promise<void> {
   const res = await runQuietStep('timezone', {
@@ -936,13 +936,13 @@ async function runTimezoneStep(): Promise<void> {
 
   let tz: string | null = isValidTimezone(raw) ? raw : null;
   if (!tz) {
-    if (claudeCliAvailable()) {
-      tz = await resolveTimezoneViaClaude(raw);
+    if (codexCliAvailable()) {
+      tz = await resolveTimezoneViaCodex(raw);
     } else {
       p.log.warn(
         brandBody(
           wrapForGutter(
-            "That's not a standard IANA zone and I can't call Claude to interpret it here — try again with a zone like `America/New_York` or `Europe/London`.",
+            "That's not a standard IANA zone and I can't call Codex to interpret it here — try again with a zone like `America/New_York` or `Europe/London`.",
             4,
           ),
         ),
@@ -1064,7 +1064,7 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
   p.log.info(
     brandBody(
       wrapForGutter(
-        `No bash installer for ${k.bold(name)} — open Claude Code after setup and run ${k.bold(`/add-${name}`)} to install it.`,
+        `No bash installer for ${k.bold(name)} — open the Codex CLI after setup and run ${k.bold(`/add-${name}`)} to install it.`,
         4,
       ),
     ),

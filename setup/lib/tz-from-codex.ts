@@ -1,17 +1,15 @@
 /**
- * Headless Claude fallback for timezone resolution.
+ * Headless Codex fallback for timezone resolution.
  *
  * When the user answers the UTC-confirmation prompt with something that
  * isn't a valid IANA zone ("NYC", "Jerusalem time", "eastern"), spawn
- * `claude -p` with a narrow prompt asking for a single IANA string and
+ * `codex exec` with a narrow prompt asking for a single IANA string and
  * validate the reply with `isValidTimezone` before returning it.
- *
- * Gated on claude being on PATH — if the user did the paste-OAuth or
- * paste-API auth path they may not have the CLI installed. Returns null
- * in that case so the caller can ask them to try again with a canonical
- * zone string.
  */
 import { execSync, spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import * as p from '@clack/prompts';
 import k from 'kleur';
@@ -19,9 +17,9 @@ import k from 'kleur';
 import { isValidTimezone } from '../../src/timezone.js';
 import { fitToWidth, fmtDuration } from './theme.js';
 
-export function claudeCliAvailable(): boolean {
+export function codexCliAvailable(): boolean {
   try {
-    execSync('command -v claude', { stdio: 'ignore' });
+    execSync('command -v codex', { stdio: 'ignore' });
     return true;
   } catch {
     return false;
@@ -29,15 +27,13 @@ export function claudeCliAvailable(): boolean {
 }
 
 /**
- * Ask headless Claude to map a free-text location/timezone description to
+ * Ask headless Codex to map a free-text location/timezone description to
  * a valid IANA zone. Shows a spinner with elapsed time. Returns the
- * resolved zone string on success, or null if the CLI is missing, Claude
+ * resolved zone string on success, or null if the CLI is missing, Codex
  * errored, or the reply wasn't a valid IANA zone.
  */
-export async function resolveTimezoneViaClaude(
-  input: string,
-): Promise<string | null> {
-  if (!claudeCliAvailable()) return null;
+export async function resolveTimezoneViaCodex(input: string): Promise<string | null> {
+  if (!codexCliAvailable()) return null;
 
   const prompt = buildPrompt(input);
 
@@ -50,33 +46,26 @@ export async function resolveTimezoneViaClaude(
     s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
   }, 1000);
 
-  const reply = await queryClaude(prompt);
+  const reply = await queryCodex(prompt);
 
   clearInterval(tick);
   const suffix = ` (${fmtDuration(Date.now() - start)})`;
 
   const resolved = reply ? extractTimezone(reply) : null;
   if (resolved) {
-    s.stop(
-      `${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`,
-    );
+    s.stop(`${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`);
     return resolved;
   }
-  s.stop(
-    `${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(
-      suffix,
-    )}`,
-    1,
-  );
+  s.stop(`${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(suffix)}`, 1);
   return null;
 }
 
 function buildPrompt(input: string): string {
   return [
-    'Convert the user\'s description of where they are into a single IANA',
+    "Convert the user's description of where they are into a single IANA",
     'timezone identifier (e.g. "America/New_York", "Europe/London",',
     '"Asia/Jerusalem"). Respond with ONLY the IANA string on a single line,',
-    'nothing else — no prose, no quotes, no punctuation. If you cannot',
+    'nothing else: no prose, no quotes, no punctuation. If you cannot',
     'determine a zone with reasonable confidence, reply with exactly:',
     'UNKNOWN',
     '',
@@ -84,24 +73,27 @@ function buildPrompt(input: string): string {
   ].join('\n');
 }
 
-function queryClaude(prompt: string): Promise<string | null> {
+function queryCodex(prompt: string): Promise<string | null> {
   return new Promise((resolve) => {
-    const child = spawn('claude', ['-p', '--output-format', 'text'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
+    const outputPath = path.join(os.tmpdir(), `nanoclaw-timezone-${process.pid}-${Date.now()}.txt`);
+    const child = spawn(
+      'codex',
+      ['exec', '--sandbox', 'read-only', '--ephemeral', '--output-last-message', outputPath, '-'],
+      { stdio: ['pipe', 'ignore', 'ignore'] },
+    );
     let settled = false;
     const settle = (value: string | null): void => {
       if (settled) return;
       settled = true;
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {}
       resolve(value);
     };
 
-    child.stdout.on('data', (c: Buffer) => {
-      stdout += c.toString('utf-8');
-    });
     child.on('close', (code) => {
-      settle(code === 0 && stdout.trim() ? stdout : null);
+      const stdout = code === 0 && fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf-8') : '';
+      settle(stdout.trim() ? stdout : null);
     });
     child.on('error', () => settle(null));
 
@@ -110,7 +102,7 @@ function queryClaude(prompt: string): Promise<string | null> {
 }
 
 function extractTimezone(reply: string): string | null {
-  // Claude occasionally prefixes with a backtick or wraps in quotes despite
+  // Models sometimes prefix with a backtick or wrap in quotes despite
   // instructions; take the first line that looks like a zone.
   const lines = reply
     .split('\n')

@@ -126,7 +126,7 @@ export const CONFIG: Entry[] = [
     key: 'assistMode',
     envVar: 'NANOCLAW_SETUP_ASSIST_MODE',
     label: 'Assist mode',
-    help: 'Use Codex assist on failure.',
+    help: 'Enable Codex-assisted diagnostics on setup failures.',
     surface: 'flag',
     type: 'boolean',
     default: false,

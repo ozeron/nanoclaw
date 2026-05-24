@@ -14,7 +14,8 @@
  *      in a clack note, then hand off to `setup/run-suggested.sh` for
  *      editable pre-fill + exec.
  *
- * Skippable with NANOCLAW_SKIP_CODEX_ASSIST=1 for CI/scripted runs.
+ * Skippable with NANOCLAW_SKIP_CODEX_ASSIST=1 for CI/scripted runs, or disable
+ * entirely with NANOCLAW_SETUP_ASSIST_MODE=0.
  */
 import { execSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
@@ -44,11 +45,11 @@ export const STEP_FILES: Record<string, string[]> = {
   environment: ['setup/environment.ts'],
   container: ['setup/container.ts', 'setup/install-docker.sh', 'container/Dockerfile'],
   onecli: ['setup/onecli.ts'],
-  auth: ['setup/auth.ts', 'setup/register-claude-token.sh', 'setup/install-claude.sh'],
+  auth: ['setup/auto.ts', 'setup/environment.ts'],
   mounts: ['setup/mounts.ts'],
   service: ['setup/service.ts'],
   'cli-agent': ['setup/cli-agent.ts', 'scripts/init-cli-agent.ts'],
-  timezone: ['setup/timezone.ts', 'setup/lib/tz-from-claude.ts'],
+  timezone: ['setup/timezone.ts', 'setup/lib/tz-from-codex.ts'],
   channel: ['setup/auto.ts'],
   verify: ['setup/verify.ts'],
   // Channel-specific sub-steps:
@@ -74,7 +75,7 @@ export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
  * Codex unreachable, user chose not to run).
  */
 export async function offerClaudeAssist(ctx: AssistContext, projectRoot: string = process.cwd()): Promise<boolean> {
-  if (process.env.NANOCLAW_SKIP_CODEX_ASSIST === '1' || process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') {
+  if (!isSetupAssistEnabled()) {
     return false;
   }
   if (!(await ensureCodexReady())) return false;
@@ -110,6 +111,20 @@ export async function offerClaudeAssist(ctx: AssistContext, projectRoot: string 
 
   await runSuggested(parsed.command, projectRoot);
   return true;
+}
+
+export function isSetupAssistEnabled(): boolean {
+  if (process.env.NANOCLAW_SKIP_CODEX_ASSIST === '1' || process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
+  const mode = parseBoolean(process.env.NANOCLAW_SETUP_ASSIST_MODE);
+  return mode === undefined ? true : mode;
+}
+
+function parseBoolean(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
 }
 
 function isCodexInstalled(): boolean {

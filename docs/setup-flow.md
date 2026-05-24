@@ -36,7 +36,7 @@ stranger on day one.
 
 Rules:
 - **No discontinuity.** Every sub-step belongs to the same visual flow.
-  The only exception is Anthropic credential registration (see below).
+  The only exception is Codex auth registration (see below).
 - **No raw child output.** Never `stdio: 'inherit'` a child whose output
   wasn't written by us. Capture it and show it on failure only.
 - **No debug-style prefixes** (`[add-telegram] …`, `INFO …`, timestamps).
@@ -160,28 +160,27 @@ installer invoked from `auto.ts`), it must:
 The driver handles the rest: spinner in level 1, structured append to
 level 2, raw capture to level 3.
 
-## The Anthropic exception
+## The Codex auth exception
 
-Anthropic credential registration (`setup/register-claude-token.sh`) is
-the **one** permitted break in the visual flow. Why:
+Codex auth setup in `setup/auto.ts` is the **one** permitted break in the
+visual flow. Why:
 
-- `claude setup-token` opens a browser, runs its own OAuth prompt, and
-  prints the token. It owns the TTY via `script(1)`.
-- We don't want to re-implement the OAuth device flow ourselves.
-- We don't want to intercept / mirror the token (it appears in the
-  user's terminal already — mirroring it adds attack surface).
+- `codex login` opens a browser and runs its own interactive sign-in flow.
+- We don't want to re-implement that login flow ourselves.
+- API credentials are persisted in the environment, so we avoid moving raw
+  secrets through logs.
 
 So during this step:
 - The clack flow explicitly pauses (a `p.log.step` marker says "this
-  part is interactive, you're handing off to Anthropic").
+  part is interactive, you're handing off to Codex").
 - The child inherits stdio fully.
 - When control returns, clack resumes on the next line with a success
   marker.
 
 The level-2 log still gets an entry (`auth [interactive] → success`
-with the method — subscription / oauth-token / api-key). Level-3 captures
-are optional here; mirroring `script -q` output is tricky and the risk of
-leaking the token to disk outweighs the debugging value.
+with the method — subscription / api-key). Level-3 captures are optional
+here; mirroring interactive auth output is tricky and not worth the
+small extra debug value.
 
 ## File reference
 
@@ -192,7 +191,7 @@ leaking the token to disk outweighs the debugging value.
 | `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
 | `setup/logs.ts` | The logging primitives (`logStep`, `logUserInput`, `logComplete`, `stepRawLog`, `initSetupLog`). Single source of truth for level 2/3 formatting and file paths. |
 | `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
-| `setup/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, returns a status to the driver. |
+| `setup/auto.ts` | The Codex auth interactive exception (`auth` step). Inherits stdio for subscription sign-in, returns auth status via step logs. |
 | `setup/add-telegram.sh` | Non-interactive adapter installer. Reads `TELEGRAM_BOT_TOKEN` from env; never prompts. User-facing bits live in `auto.ts`. |
 | `setup/pair-telegram.ts` | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes. |
 
@@ -205,7 +204,7 @@ leaking the token to disk outweighs the debugging value.
   It breaks the clack flow — the spinner line gets torn. Use
   `log.info` / `log.error` from `src/log.ts` (writes to the raw log)
   instead.
-- **`stdio: 'inherit'` for a non-exception child.** See Anthropic above.
+- **`stdio: 'inherit'` for a non-exception child.** See Codex auth above.
   Anything else needs `pipe` + explicit capture.
 - **Tee-ing to stderr.** Clack's spinner owns the terminal during a step.
   Even stderr writes tear the frame. Pipe everything, then choose what
@@ -221,6 +220,6 @@ leaking the token to disk outweighs the debugging value.
 - **Raw log rotation for multi-run installs.** Currently each run
   overwrites. Fine for now; revisit if support needs to compare
   successive attempts.
-- **Structured output from `register-claude-token.sh`.** The interactive
-  step emits no machine-readable status today. Future could add a
-  post-interaction status block with the method used.
+- **Structured output from `setup/auto.ts` auth step.** The interactive login path
+  emits its own status directly, which keeps secrets out of the logs and avoids
+  re-running an opaque browser flow.

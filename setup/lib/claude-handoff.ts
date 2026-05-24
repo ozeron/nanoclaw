@@ -27,6 +27,7 @@ import * as p from '@clack/prompts';
 import {
   type AssistContext,
   BIG_PICTURE_FILES,
+  isSetupAssistEnabled,
   ensureCodexReady,
   offerClaudeAssist,
   STEP_FILES,
@@ -60,6 +61,7 @@ export interface HandoffContext {
  * Ask Codex for contextual help. Returns when Codex exits.
  */
 export async function offerClaudeHandoff(ctx: HandoffContext): Promise<boolean> {
+  if (!isSetupAssistEnabled()) return false;
   if (!(await ensureCodexReady())) return false;
 
   const systemPrompt = buildSystemPrompt(ctx);
@@ -157,7 +159,7 @@ function buildSystemPrompt(ctx: HandoffContext): string {
     ...(ctx.files ?? []),
     'logs/setup.log',
     'logs/setup-steps/',
-    `.claude/skills/add-${ctx.channel}/SKILL.md`,
+    `.agents/skills/add-${ctx.channel}/SKILL.md`,
     `setup/channels/${ctx.channel}.ts`,
   ].filter((v, i, a) => a.indexOf(v) === i);
 
@@ -183,7 +185,7 @@ export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: stri
  * things during the session), `false` if skipped/declined/unavailable.
  */
 async function offerFailureHandoff(ctx: AssistContext, projectRoot: string): Promise<boolean> {
-  if (process.env.NANOCLAW_SKIP_CODEX_ASSIST === '1' || process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
+  if (!isSetupAssistEnabled()) return false;
   if (!(await ensureCodexReady())) return false;
 
   const want = ensureAnswer(
